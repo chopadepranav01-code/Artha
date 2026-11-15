@@ -15,6 +15,8 @@ import {
 } from 'recharts'
 import './App.css'
 import { generateFinanceAssistantReply } from './lib/openai'
+import { isFirebaseConfigured, firebaseAuth, googleProvider } from './lib/firebase'
+import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth'
 import { defaultAccounts, defaultBills, defaultBudgets, defaultDebts, defaultGoals, defaultTransactions, loadStoredState, persistStoredState, type Account, type Budget, type Debt, type Goal, type RecurringBill, type Transaction } from './lib/financeData'
 
 const monthlySeries = [
@@ -72,10 +74,11 @@ function App() {
   const [debts, setDebts] = useState<Debt[]>(defaultDebts)
   const [isLoadingAI, setIsLoadingAI] = useState(false)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [authEmail, setAuthEmail] = useState('demo@artha.app')
+  const [authEmail, setAuthEmail] = useState('')
+  const [authInitialized, setAuthInitialized] = useState(false)
+  const [authError, setAuthError] = useState('')
   const [authModalOpen, setAuthModalOpen] = useState(false)
   const [resetModalOpen, setResetModalOpen] = useState(false)
-  const [emailInput, setEmailInput] = useState('demo@artha.app')
   const [quickAddOpen, setQuickAddOpen] = useState(false)
   const [budgetModalOpen, setBudgetModalOpen] = useState(false)
   const [goalModalOpen, setGoalModalOpen] = useState(false)
@@ -126,21 +129,32 @@ function App() {
     setBills(snapshot.bills)
     setDebts(snapshot.debts)
 
+  }, [])
+
+  useEffect(() => {
     if (typeof window !== 'undefined') {
-      const storedAuth = window.localStorage.getItem('artha-auth-state')
-      if (storedAuth) {
-        try {
-          const parsed = JSON.parse(storedAuth) as { email?: string; isAuthenticated?: boolean }
-          if (parsed.email) {
-            setAuthEmail(parsed.email)
-            setEmailInput(parsed.email)
-          }
-          setIsAuthenticated(Boolean(parsed.isAuthenticated))
-        } catch {
-          setIsAuthenticated(false)
-        }
-      }
+      window.localStorage.removeItem('artha-auth-state')
     }
+
+    if (!firebaseAuth) {
+      setAuthInitialized(true)
+      return
+    }
+
+    return onAuthStateChanged(
+      firebaseAuth,
+      (user) => {
+        setAuthEmail(user?.email ?? '')
+        setIsAuthenticated(Boolean(user))
+        setAuthInitialized(true)
+      },
+      () => {
+        setAuthError('Unable to verify your Google sign-in. Please refresh and try again.')
+        setAuthEmail('')
+        setIsAuthenticated(false)
+        setAuthInitialized(true)
+      },
+    )
   }, [])
 
   useEffect(() => {
@@ -148,33 +162,42 @@ function App() {
   }, [transactions, budgets, goals, accounts, bills, debts])
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem('artha-auth-state', JSON.stringify({ isAuthenticated, email: authEmail }))
+    if (authInitialized && !isAuthenticated) {
+      setAuthModalOpen(true)
     }
-  }, [isAuthenticated, authEmail])
+  }, [authInitialized, isAuthenticated])
 
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const storedAuth = window.localStorage.getItem('artha-auth-state')
-      if (!isAuthenticated && !storedAuth) {
-        setAuthModalOpen(true)
+  const handleSignIn = async () => {
+    setAuthError('')
+
+    if (!isFirebaseConfigured || !firebaseAuth) {
+      setAuthError('Google sign-in is not configured yet. Add the Firebase web app settings and redeploy.')
+      return
+    }
+
+    try {
+      await signInWithPopup(firebaseAuth, googleProvider)
+      setAuthModalOpen(false)
+    } catch (error) {
+      const errorCode = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+      if (errorCode === 'auth/unauthorized-domain') {
+        setAuthError('This domain is not authorized in Firebase Authentication.')
+      } else if (errorCode === 'auth/popup-closed-by-user') {
+        setAuthError('Sign-in was cancelled.')
+      } else {
+        setAuthError('Google sign-in failed. Please try again.')
       }
     }
-  }, [isAuthenticated])
-
-  const handleSignIn = (email: string) => {
-    const nextEmail = email.trim() || 'demo@artha.app'
-    setAuthEmail(nextEmail)
-    setEmailInput(nextEmail)
-    setIsAuthenticated(true)
-    setAuthModalOpen(false)
   }
 
-  const handleSignOut = () => {
-    setIsAuthenticated(false)
-    setAuthEmail('demo@artha.app')
-    setEmailInput('demo@artha.app')
-    setAuthModalOpen(false)
+  const handleSignOut = async () => {
+    if (!firebaseAuth) return
+
+    try {
+      await signOut(firebaseAuth)
+    } catch {
+      setAuthError('Unable to sign out right now. Please try again.')
+    }
   }
 
   const handleResetData = () => {
@@ -184,15 +207,14 @@ function App() {
     setAccounts([])
     setBills([])
     setDebts([])
-    setIsAuthenticated(false)
-    setAuthEmail('demo@artha.app')
-    setEmailInput('demo@artha.app')
     setResetModalOpen(false)
-    setAuthModalOpen(true)
+    setAuthError('')
 
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem('artha-finance-data-v1')
-      window.localStorage.setItem('artha-auth-state', JSON.stringify({ isAuthenticated: false, email: 'demo@artha.app' }))
+    }
+    if (firebaseAuth) {
+      void signOut(firebaseAuth)
     }
   }
 
@@ -418,37 +440,11 @@ function App() {
                 </button>
               </div>
 
-              <form
-                className="auth-form"
-                onSubmit={(event) => {
-                  event.preventDefault()
-                  handleSignIn(emailInput)
-                }}
-              >
-                <label>
-                  Email address
-                  <input
-                    type="email"
-                    value={emailInput}
-                    onChange={(event) => setEmailInput(event.target.value)}
-                    placeholder="you@example.com"
-                  />
-                </label>
-
-                <button type="submit" className="primary-button auth-submit">
-                  Continue with email
-                </button>
-              </form>
-
-              <div className="auth-divider"><span>or</span></div>
-
               <div className="auth-alt-actions">
-                <button type="button" className="ghost-button auth-google" onClick={() => handleSignIn('demo@artha.app')}>
+                <button type="button" className="primary-button auth-submit" onClick={() => void handleSignIn()} disabled={!authInitialized}>
                   Continue with Google
                 </button>
-                <button type="button" className="ghost-button" onClick={() => handleSignIn('demo@artha.app')}>
-                  Continue as demo user
-                </button>
+                {authError && <p className="auth-error" role="alert">{authError}</p>}
               </div>
             </div>
           </div>
@@ -1286,37 +1282,11 @@ function App() {
               </button>
             </div>
 
-            <form
-              className="auth-form"
-              onSubmit={(event) => {
-                event.preventDefault()
-                handleSignIn(emailInput)
-              }}
-            >
-              <label>
-                Email address
-                <input
-                  type="email"
-                  value={emailInput}
-                  onChange={(event) => setEmailInput(event.target.value)}
-                  placeholder="you@example.com"
-                />
-              </label>
-
-              <button type="submit" className="primary-button auth-submit">
-                Continue with email
-              </button>
-            </form>
-
-            <div className="auth-divider"><span>or</span></div>
-
             <div className="auth-alt-actions">
-              <button type="button" className="ghost-button auth-google" onClick={() => handleSignIn('demo@artha.app')}>
+              <button type="button" className="primary-button auth-submit" onClick={() => void handleSignIn()} disabled={!authInitialized}>
                 Continue with Google
               </button>
-              <button type="button" className="ghost-button" onClick={() => handleSignIn('demo@artha.app')}>
-                Continue as demo user
-              </button>
+              {authError && <p className="auth-error" role="alert">{authError}</p>}
             </div>
           </div>
         </div>

@@ -295,6 +295,12 @@
   border-color: rgba(96, 165, 250, 0.18);
 }
 
+.auth-error {
+  margin: 0;
+  color: #f0a48d;
+  font-size: 0.88rem;
+}
+
 .app-shell {
   width: 100%;
   padding: 0;
